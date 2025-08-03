@@ -50,7 +50,7 @@ async def make_subscribe_markup(code):
     keyboard.add(InlineKeyboardButton("✅ Tekshirish", callback_data=f"check_sub:{code}"))
     return keyboard
 
-ADMINS = {6486825926, 7711928526}
+ADMINS = {6486825926}
 
 # === HOLATLAR ===
 
@@ -91,9 +91,14 @@ async def get_unsubscribed_channels(user_id):
     unsubscribed = []
     for channel in CHANNELS:
         try:
-            member = await bot.get_chat_member(channel.strip(), user_id)
+            # Kanal nomi yoki ID tozalash
+            chat_id = channel.strip()
+            member = await bot.get_chat_member(chat_id, user_id)
             if member.status not in ["member", "administrator", "creator"]:
-                unsubscribed.append(channel)
+                unsubscribed.append(chat_id)
+        except (ChatNotFound, ValueError) as e:
+            print(f"❗ Kanal topilmadi yoki noto'g'ri: {channel} -> {e}")
+            unsubscribed.append(channel)
         except Exception as e:
             print(f"❗ Obuna tekshirishda xatolik: {channel} -> {e}")
             unsubscribed.append(channel)
@@ -105,37 +110,54 @@ async def make_full_subscribe_markup(code):
     for ch in CHANNELS:
         try:
             channel = await bot.get_chat(ch.strip())
-            invite_link = channel.invite_link or (await channel.export_invite_link())
+            # Taklif havolasini olish
+            invite_link = channel.invite_link
+            if not invite_link:
+                invite_link = await channel.export_invite_link()
             markup.add(InlineKeyboardButton(f"➕ {channel.title}", url=invite_link))
         except Exception as e:
-            print(f"❗ Kanalni olishda xatolik: {ch} -> {e}")
+            print(f"❗ Kanal ma'lumotini olishda xatolik: {ch} -> {e}")
+            # Xatolik bo'lsa ham, foydalanuvchi kanalga o'tish imkoniyatini olishi kerak
+            # Lekin xavfsizlik uchun olib tashlash yoki olib tashamaslik
+            pass  # Shu kanalni ko'rsatmaymiz, lekin boshqalari ishlayveradi
     markup.add(InlineKeyboardButton("✅ Tekshirish", callback_data=f"checksub:{code}"))
     return markup
 
-# === /start HANDLER – to‘liq versiya (statistika bilan) ===
-@dp.message_handler(commands=['start'])
-async def start_handler(message: types.Message):
-    await add_user(message.from_user.id)
-    args = message.get_args()
+# === UMUMIY KODNI QAYTA ISHLASH FUNKSIYASI ===
+async def handle_code_input(message: types.Message, code: str):
+    user_id = message.from_user.id
 
-    if args and args.isdigit():
-        code = args
-        await increment_stat(code, "init")
+    # Foydalanuvchini qo'shish (yangi bo'lsa)
+    await add_user(user_id)
+
+    # Statistikani oshirish
+    await increment_stat(code, "init")
+    await increment_stat(code, "searched")
+
+    # Obuna holatini tekshirish
+    unsubscribed = await get_unsubscribed_channels(user_id)
+
+    if unsubscribed:
+        markup = await make_full_subscribe_markup(code)
+        await message.answer(
+            "❗ Kino olishdan oldin quyidagi kanallarga obuna bo'ling:",
+            reply_markup=markup
+        )
+    else:
+        await send_reklama_post(user_id, code)
         await increment_stat(code, "searched")
 
-        unsubscribed = await get_unsubscribed_channels(message.from_user.id)
-        if unsubscribed:
-            markup = await make_full_subscribe_markup(code)
-            await message.answer(
-                "❗ Kino olishdan oldin quyidagi kanal(lar)ga obuna bo‘ling:",
-                reply_markup=markup
-            )
-        else:
-            await send_reklama_post(message.from_user.id, code)
-            await increment_stat(code, "searched")
+# === /start HANDLER ===
+@dp.message_handler(commands=['start'])
+async def start_handler(message: types.Message):
+    args = message.get_args()
+
+    # Agar /start kod bilan chaqirilgan bo'lsa
+    if args and args.isdigit():
+        await handle_code_input(message, args)
         return
 
-    # === Oddiy /start ===
+    # Oddiy /start
     if message.from_user.id in ADMINS:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add("➕ Anime qo‘shish")
@@ -153,9 +175,18 @@ async def start_handler(message: types.Message):
         )
         await message.answer("🎬 Botga xush kelibsiz!\nKod kiriting:", reply_markup=kb)
 
-# === TEKSHIRUV CALLBACK – faqat obuna bo‘lmaganlar uchun ===
+# === BEVOSITA KODNI QABUL QILISH HANDLERI ===
+@dp.message_handler(lambda m: m.text.isdigit() and len(m.text) <= 10 and m.chat.type == 'private')
+async def direct_code_handler(message: types.Message):
+    code = message.text.strip()
+    await handle_code_input(message, code)
+
+
+# === OBUNANI TEKSHIRISH CALLBACK ===
 @dp.callback_query_handler(lambda c: c.data.startswith("checksub:"))
 async def check_subscription_callback(call: CallbackQuery):
+    await call.answer()  # Callbackni bekor qilish
+
     code = call.data.split(":")[1]
     unsubscribed = await get_unsubscribed_channels(call.from_user.id)
 
@@ -164,16 +195,18 @@ async def check_subscription_callback(call: CallbackQuery):
         for ch in unsubscribed:
             try:
                 channel = await bot.get_chat(ch.strip())
-                invite_link = channel.invite_link or (await channel.export_invite_link())
+                invite_link = channel.invite_link or await channel.export_invite_link()
                 markup.add(InlineKeyboardButton(f"➕ {channel.title}", url=invite_link))
             except Exception as e:
-                print(f"❗ Kanalni olishda xatolik: {ch} -> {e}")
+                print(f"❗ Kanalga havola olishda xatolik: {ch} -> {e}")
         markup.add(InlineKeyboardButton("✅ Yana tekshirish", callback_data=f"checksub:{code}"))
-        await call.message.edit_text("❗ Obuna bo‘lmagan kanal(lar):", reply_markup=markup)
+        await call.message.edit_text("❗ Obuna bo'lmagan kanallar:", reply_markup=markup)
     else:
         await call.message.delete()
         await send_reklama_post(call.from_user.id, code)
         await increment_stat(code, "searched")
+
+
 # === 🎞 Barcha animelar tugmasi
 @dp.message_handler(lambda m: m.text == "🎞 Barcha animelar")
 async def show_all_animes(message: types.Message):
